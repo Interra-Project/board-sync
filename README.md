@@ -63,7 +63,7 @@ Effort follows Workload in one direction: a hand edit of Effort on an issue that
    - Repository: Issues read and write, Metadata read.
    - Organization: Projects read and write, Issue fields read.
 2. Install it on Interra-Project and on FormingWorlds, with access to all repositories whose issues are on the boards.
-3. Protect `main` in this repository with a rule that requires a pull request with an approving review, includes administrators and blocks force pushes, because code on `main` runs with the App key and the deploy key.
+3. Protect `main` in this repository with a rule that requires a pull request with an approving review and the `test` check, and blocks force pushes and deletion, because code on `main` runs with the App key and the deploy key.
    Then create the environment `board-sync` and limit its deployment branches to `main`.
    Do not add a required reviewer: it would hold every scheduled run too.
 4. Create `Interra-Project/board-sync-state` as a private repository with one commit on `main`, for example a README.

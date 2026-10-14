@@ -59,6 +59,10 @@ class GraphQLError(RuntimeError):
     """The GraphQL API returned errors."""
 
 
+# Error paths of a missing board or org; any other NOT_FOUND in a board read stops the read.
+BOARD_GONE = (("organization",), ("organization", "projectV2"))
+
+
 class BoardNotFound(RuntimeError):
     """A configured board does not exist or the token cannot see it."""
 
@@ -103,9 +107,10 @@ class Client:
         retries : int
             Retries after an HTTP 502, 503 or 504, a network error, or a rate
             limit (HTTP 403 or 429, or a ``RATE_LIMITED`` error).
-        allow_not_found : bool
+        allow_not_found : bool or tuple
             Return the partial ``data`` when every error is of type
             ``NOT_FOUND`` (for example a deleted issue in a ``nodes`` list).
+            A tuple of paths further limits this to errors at those paths.
 
         Returns
         -------
@@ -153,7 +158,11 @@ class Client:
             time.sleep(60)
             return self.post(query, variables, retries - 1, allow_not_found)
         if errors:
-            if allow_not_found and out.get("data") is not None and all(e.get("type") == "NOT_FOUND" for e in errors):
+            paths = allow_not_found if isinstance(allow_not_found, tuple) else None
+            found = all(
+                e.get("type") == "NOT_FOUND" and (paths is None or tuple(e.get("path") or ()) in paths) for e in errors
+            )
+            if allow_not_found and out.get("data") is not None and found:
                 return out["data"]
             raise GraphQLError(json.dumps(errors)[:2000])
         return out["data"]
@@ -201,7 +210,7 @@ def read_board(client, owner, number):
     after, items, fields, pid, skipped = None, [], None, None, 0
     while True:
         # A missing board or org comes back as null data with a NOT_FOUND error.
-        data = client.post(BOARD_QUERY, {"owner": owner, "number": number, "after": after}, allow_not_found=True)
+        data = client.post(BOARD_QUERY, {"owner": owner, "number": number, "after": after}, allow_not_found=BOARD_GONE)
         proj = (data.get("organization") or {}).get("projectV2")
         if proj is None:
             raise BoardNotFound(f"{owner} project {number}")

@@ -57,10 +57,10 @@ def remote_files(r):
 
 def test_first_run_without_a_state_file_stores_snapshot_and_report(repos):
     (repos["run"] / "snapshot.json").write_text("{}\n")
-    (repos["run"] / "report.txt").write_text("stop: 1688 writes\n")
+    (repos["run"] / "report.txt").write_text("stop: 30 writes\n")
     assert store(repos).returncode == 0
     files, log = remote_files(repos)
-    assert files["report.txt"] == "stop: 1688 writes\n" and "snapshot.json" in files and "state.json" not in files
+    assert files["report.txt"] == "stop: 30 writes\n" and "snapshot.json" in files and "state.json" not in files
     assert log.splitlines()[0] == "Sync run 1"
 
 

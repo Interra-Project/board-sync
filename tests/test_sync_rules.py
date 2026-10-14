@@ -1,4 +1,4 @@
-"""Regression tests for faults in the sync rules."""
+"""Tests of the sync rules across runs: bulk approval, parking, returning places and time limits."""
 
 import io
 import json

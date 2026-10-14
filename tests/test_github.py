@@ -123,11 +123,12 @@ class Fake:
 
     def __init__(self, pages=None, fields=None, values=None, pid="PID"):
         self.pages, self.fields, self.values = list(pages or []), fields or [], values or []
-        self.sent, self.flags, self.pid = [], [], pid
+        self.sent, self.flags, self.pid, self.cursors = [], [], pid, []
 
     def post(self, query, variables=None, allow_not_found=False):
         if "projectV2(number" in query:
             self.flags.append(("board", allow_not_found))
+            self.cursors.append(variables["after"])
             return {"organization": {"projectV2": {**self.pages.pop(0), "id": self.pid}}}
         if "issueFields(first" in query:
             self.flags.append(("issue_fields", allow_not_found))
@@ -185,7 +186,7 @@ def test_read_board_pages_and_skips_drafts():
     draft = {"id": "d", "content": {}, "fieldValues": {"pageInfo": DONE, "nodes": []}}
     fake = Fake(pages=[page([board_item("A"), draft, None], more=True), page([board_item("B")])])
     pid, fields, items, skipped = github.read_board(fake, "FormingWorlds", 7)
-    assert pid == "PID" and skipped == 2
+    assert pid == "PID" and skipped == 2 and fake.cursors == [None, "C1"]
     assert fields["Status"] == {"id": "F2", "type": "select", "options": {"TBD": "o1"}}
     assert fields["Title"]["type"] == "other"
     assert [i[0] for i in items] == ["A", "B"]
@@ -230,7 +231,11 @@ def test_only_the_issue_values_read_accepts_partial_responses():
     interra = Fake(pages=[page([board_item("X", "Interra-Project")]), page([])], values=[issue_node("X")])
     fw = Fake(pages=[page([])])
     github.read_all({"Interra-Project": interra, "FormingWorlds": fw})
-    assert set(interra.flags + fw.flags) == {("board", True), ("issue_fields", False), ("issue_values", True)}
+    assert set(interra.flags + fw.flags) == {
+        ("board", github.BOARD_GONE),
+        ("issue_fields", False),
+        ("issue_values", True),
+    }
 
 
 def test_read_issue_values_batches():
@@ -413,3 +418,12 @@ def test_missing_board_from_the_real_response_shape():
     no_org = {"data": {"organization": None}, "errors": [{"type": "NOT_FOUND", "path": ["organization"]}]}
     with pytest.raises(github.BoardNotFound):
         github.read_board(github.Client("t", opener_for(no_org)), "no-such-org", 1)
+
+
+def test_board_read_rejects_not_found_below_the_board():
+    deep = {
+        "data": {"organization": {"projectV2": page([board_item("A")]) | {"id": "P"}}},
+        "errors": [{"type": "NOT_FOUND", "path": ["organization", "projectV2", "items", "nodes", 0, "fieldValues"]}],
+    }
+    with pytest.raises(github.GraphQLError):
+        github.read_board(github.Client("t", opener_for(deep)), "o", 1)

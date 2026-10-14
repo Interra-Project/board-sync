@@ -1,0 +1,16 @@
+[project]
+name = "board-sync"
+version = "0.1.0"
+description = "Keep dates, priority, workload and status equal across the Interra boards, the PROTEUS board and the org issue fields"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 120
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["board_sync"]
+branch = true

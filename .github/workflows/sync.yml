@@ -1,0 +1,89 @@
+name: Board sync
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Write the planned values (off prints the plan only)
+        type: boolean
+        default: false
+      allow_bulk:
+        description: Apply even when the plan exceeds the change limit
+        type: boolean
+        default: false
+
+concurrency:
+  group: board-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: github.repository == 'Interra-Project/board-sync' && github.ref == 'refs/heads/main'
+    environment: board-sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out the state repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: Interra-Project/board-sync-state
+          ssh-key: ${{ secrets.STATE_DEPLOY_KEY }}
+          path: state
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Token for Interra-Project
+        id: interra
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ vars.BOARD_SYNC_CLIENT_ID }}
+          private-key: ${{ secrets.BOARD_SYNC_PRIVATE_KEY }}
+          owner: Interra-Project
+
+      - name: Token for FormingWorlds
+        id: formingworlds
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ vars.BOARD_SYNC_CLIENT_ID }}
+          private-key: ${{ secrets.BOARD_SYNC_PRIVATE_KEY }}
+          owner: FormingWorlds
+
+      - name: Sync
+        timeout-minutes: 20
+        env:
+          BOARD_SYNC_TOKEN_INTERRA_PROJECT: ${{ steps.interra.outputs.token }}
+          BOARD_SYNC_TOKEN_FORMINGWORLDS: ${{ steps.formingworlds.outputs.token }}
+          APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          BULK: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_bulk }}
+        run: |
+          flags="--state state/state.json --snapshot-dir state --report state/report.txt --summary --pause 1"
+          if [ "$APPLY" = "true" ]; then flags="$flags --apply"; fi
+          if [ "$BULK" = "true" ]; then flags="$flags --allow-bulk"; fi
+          code=0
+          python -m board_sync $flags || code=$?
+          if [ "$code" = 4 ]; then
+            echo "::warning::Some writes are parked after repeated failures; see report.txt in the state repository."
+            code=0
+          fi
+          exit "$code"
+
+      - name: Store state, snapshot and report
+        if: always()
+        env:
+          RUN_ID: ${{ github.run_id }}
+          GIT_AUTHOR_NAME: board-sync
+          GIT_AUTHOR_EMAIL: board-sync@users.noreply.github.com
+          GIT_COMMITTER_NAME: board-sync
+          GIT_COMMITTER_EMAIL: board-sync@users.noreply.github.com
+        run: bash scripts/store_state.sh state "$RUN_ID"

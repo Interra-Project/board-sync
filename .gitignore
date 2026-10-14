@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.coverage
+.pytest_cache/
+.ruff_cache/
+*.tmp
+# Files a local run writes: they hold private board data
+state.json
+state/
+snapshot/
+snapshot.json
+report.txt

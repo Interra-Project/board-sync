@@ -166,7 +166,7 @@ def apply(args, clients, snap, result, active, parked, state, now, summary, deta
     """
     old_fails = state.get("failures", {})
     batch, later = active[: args.limit], active[args.limit :]
-    failed, done_keys, done, in_row, late = [], set(), 0, 0, False
+    failed, done_keys, done, in_row, late, tried = [], set(), 0, 0, False, False
     try:
         for n, w in enumerate(batch):
             if in_row >= STOP_AFTER_FAILURES:
@@ -176,6 +176,7 @@ def apply(args, clients, snap, result, active, parked, state, now, summary, deta
                 break
             if n and args.pause:
                 time.sleep(args.pause)
+            tried = True
             try:
                 github.write(clients, snap, w)
                 done_keys.add(write_key(w))
@@ -203,8 +204,8 @@ def apply(args, clients, snap, result, active, parked, state, now, summary, deta
         idle = 0 if progress else (0 if args.allow_bulk else state.get("bulk_idle", 0)) + 1
         keep = left and idle < BULK_IDLE_RUNS
         result.state["bulk_keys"], result.state["bulk_idle"] = (left, idle) if keep else ([], 0)
-        # Only a run that tried a write starts the interval, so a run without writes changes no state.
-        last = args.started_at.isoformat(timespec="seconds") if done else state.get("applied_at")
+        # Only a run that tried a write moves the start of the interval.
+        last = args.started_at.isoformat(timespec="seconds") if tried else state.get("applied_at")
         if last:
             result.state["applied_at"] = last
         save_state(args.state, result.state)
@@ -247,9 +248,9 @@ def plan_and_apply(args, clients, snap, out):
     if result.skipped:
         summary.append(f"skipped: {len(result.skipped)} values without an option at the place")
     if result.held:
-        summary.append(f"held back: {len(result.held)} places of an issue that read empty, listed in the report")
+        summary.append(f"held back: {len(result.held)} places of an issue with values missing, listed in the report")
         detail += [
-            f"held back {snap['items'][i]['url']} {config.BOARDS.get(p, {}).get('title', 'issue field')}: read empty"
+            f"held back {snap['items'][i]['url']} {config.BOARDS.get(p, {}).get('title', 'issue field')}: values missing from the read"
             for i, p in result.held
         ]
     if parked:
@@ -288,7 +289,7 @@ def too_soon(args):
         return None
     gap = args.started_at - datetime.fromisoformat(last)
     if gap < -CLOCK_SLACK:
-        raise StateError(f"the last run that wrote started at {last}, after this run")
+        raise StateError(f"applied_at: the last run that wrote started at {last}, after this run")
     return last if gap < timedelta(minutes=args.min_interval) else None
 
 

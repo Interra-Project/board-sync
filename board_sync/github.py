@@ -291,7 +291,7 @@ def _read_board_once(client, owner, number):
             if fv["totalCount"] == 0 or got != fv["totalCount"]:
                 raise ShortBoardRead(f"board {number}: an item has {got} values, total {fv['totalCount']}")
             values = {}
-            for v in node["fieldValues"]["nodes"]:
+            for v in fv["nodes"]:
                 if v and v.get("field"):
                     values[v["field"]["name"]] = [v.get("date", v.get("name")), v.get("updatedAt")]
             org = content["repository"]["owner"]["login"]

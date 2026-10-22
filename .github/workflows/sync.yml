@@ -78,10 +78,10 @@ jobs:
             code=0
           fi
           if [ "$code" = 5 ] && [ "$EVENT" = schedule ]; then
-            echo "::notice::Skipped: the last run that wrote started less than 50 minutes ago."
+            echo "::notice::Skipped: too soon after the last run that wrote; see the log above."
             code=0
           elif [ "$code" = 5 ]; then
-            echo "::error::Nothing done: the last run that wrote started less than 50 minutes ago; start this run again later."
+            echo "::error::Nothing done: too soon after the last run that wrote (see the log above); start this run again later."
           fi
           exit "$code"
 

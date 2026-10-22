@@ -834,7 +834,9 @@ def test_held_back_place_is_named_in_the_report(mk, monkeypatch, tmp_path):
     monkeypatch.setattr(github, "read_all", lambda clients: lost)
     out, report = io.StringIO(), tmp_path / "r.txt"
     assert cli.run(args(tmp_path, summary=True, report=str(report)), {}, out) == 0
-    assert "held back: 1 places of an issue" in out.getvalue() and "github.com" not in out.getvalue()
+    assert (
+        "held back: 1 places of an issue with values missing" in out.getvalue() and "github.com" not in out.getvalue()
+    )
     assert "held back https://github.com/Interra-Project/repo/issues/1 Interra Collaboration" in report.read_text()
 
 
@@ -853,6 +855,8 @@ def test_apply_run_too_soon_after_the_last_stops_before_the_read(mk, monkeypatch
         later = args(tmp_path, apply=True, min_interval=50.0, started_at=first.started_at + timedelta(minutes=gap))
         out = io.StringIO()
         assert cli.run(later, {}, out) == code
+        if code in (2, 5):  # a run that stops before the read leaves the stamp as it was
+            assert json.loads((tmp_path / "state.json").read_text())["applied_at"] == stamp
         if code == 2:
             assert "the last run that wrote started at" in out.getvalue() and len(reads) == 1
         if code == 5:
@@ -920,3 +924,48 @@ def test_issue_place_with_all_values_cleared_by_hand_is_not_held_back(mk):
     )
     r = core.plan(mk.snap([b]), state)
     assert r.held == [] and writes(r) == {("b1", "Start date"): None, ("b1", "Target date"): None}
+
+
+def test_issue_field_cleared_by_hand_while_the_issue_place_is_held_is_cleared_after(mk):
+    dates = {"Start date": ("2026-01-01", "t1"), "Target date": ("2026-02-01", "t1")}
+    state = core.plan(mk.snap([mk.item(b1=dates, issue=dates)]), {}).state
+    held = mk.item(b1=dates, issue={"Target date": (None, "t2")})  # Start date lost, Target date cleared
+    r = core.plan(mk.snap([held]), state)
+    assert r.writes == [] and r.held == [("I1", "issue")]
+    back = mk.item(b1=dates, issue={"Start date": ("2026-01-01", "t1"), "Target date": (None, "t2")})
+    r = core.plan(mk.snap([back]), r.state)
+    assert writes(r) == {("b1", "Target date"): None} and r.held == []
+
+
+def test_issue_place_held_for_one_lost_field_of_two_and_reset_fields_do_not_count(mk):
+    dates = {"Start date": ("2026-01-01", "t1"), "Target date": ("2026-02-01", "t1")}
+    state = core.plan(mk.snap([mk.item(b1=dates, issue=dates)]), {}).state
+    one = mk.item(b1=dates, issue={"Start date": ("2026-01-01", "t1")})
+    assert core.plan(mk.snap([one]), state).held == [("I1", "issue")]
+    s = mk.snap([one], ids={("issue:Interra-Project", "Target date"): "NEW"})
+    assert core.plan(s, state).held == []
+
+
+def test_stamp_moves_when_a_write_fails_or_is_stopped(mk, monkeypatch, tmp_path):
+    s = mk.snap(many(mk, 1))
+    monkeypatch.setattr(github, "read_all", lambda clients: s)
+
+    def refused(clients, snap, w):
+        raise RuntimeError("refused")
+
+    monkeypatch.setattr(github, "write", refused)
+    first = args(tmp_path, apply=True)
+    assert cli.run(first, {}, io.StringIO()) == 1
+    stamp = json.loads((tmp_path / "state.json").read_text())["applied_at"]
+    assert stamp == first.started_at.isoformat(timespec="seconds")
+    (tmp_path / "state.json").unlink()
+
+    def stopped(clients, snap, w):
+        raise SystemExit(143)  # a signal while the first write is on its way
+
+    monkeypatch.setattr(github, "write", stopped)
+    second = args(tmp_path, apply=True)
+    with pytest.raises(SystemExit):
+        cli.run(second, {}, io.StringIO())
+    stamp = json.loads((tmp_path / "state.json").read_text())["applied_at"]
+    assert stamp == second.started_at.isoformat(timespec="seconds")

@@ -341,10 +341,11 @@ def decide(fkey, places, current, raw, times, record):
     for p in places:
         before = seen.get(p, _NEW)
         if p in gone and before is not _NEW:
-            # A returning place: empty receives, its old value is no change, and a new
-            # value counts only when it is newer than the agreed value (of known time).
+            # A returning place: its old value is no change, and a new value or a clear counts
+            # only when it is newer than the agreed value (of known time); a board clear has
+            # no time, so an empty board place receives.
             newer = record.get("t") is not None and (times[p] or "") > record["t"]
-            if current[p] is not None and current[p] != before and newer:
+            if current[p] != before and newer:
                 changed.append(p)
         elif before is _NEW:
             # A place that joins with a value counts as a change; an empty one receives.

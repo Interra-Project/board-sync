@@ -335,7 +335,7 @@ FULL = [board_item("A"), board_item("B")]
 )
 def test_short_board_read_is_tried_again(short, slept):
     fake = Fake(pages=[*short, page(FULL)])
-    pid, fields, items, skipped = github.read_board(fake, "Interra-Project", 2)
+    _, _, items, skipped = github.read_board(fake, "Interra-Project", 2)
     assert [i[0] for i in items] == ["A", "B"] and skipped == 0
     assert slept == [github.BOARD_READ_WAIT]
 

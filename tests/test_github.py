@@ -141,7 +141,7 @@ class Fake:
         return {}
 
 
-def page(items, more=False, field_id="F1"):
+def page(items, more=False, field_id="F1", total=None):
     return {
         "fields": {
             "pageInfo": DONE,
@@ -152,7 +152,11 @@ def page(items, more=False, field_id="F1"):
                 {},
             ],
         },
-        "items": {"pageInfo": {"hasNextPage": more, "endCursor": "C1"}, "nodes": items},
+        "items": {
+            "totalCount": len(items) if total is None else total,
+            "pageInfo": {"hasNextPage": more, "endCursor": "C1"},
+            "nodes": items,
+        },
     }
 
 
@@ -184,7 +188,7 @@ def issue_node(iid, values=(), events=()):
 
 def test_read_board_pages_and_skips_drafts():
     draft = {"id": "d", "content": {}, "fieldValues": {"pageInfo": DONE, "nodes": []}}
-    fake = Fake(pages=[page([board_item("A"), draft, None], more=True), page([board_item("B")])])
+    fake = Fake(pages=[page([board_item("A"), draft, None], more=True, total=4), page([board_item("B")], total=4)])
     pid, fields, items, skipped = github.read_board(fake, "FormingWorlds", 7)
     assert pid == "PID" and skipped == 2 and fake.cursors == [None, "C1"]
     assert fields["Status"] == {"id": "F2", "type": "select", "options": {"TBD": "o1"}}
@@ -228,8 +232,8 @@ def test_read_issue_fields_and_values():
 
 
 def test_only_the_issue_values_read_accepts_partial_responses():
-    interra = Fake(pages=[page([board_item("X", "Interra-Project")]), page([])], values=[issue_node("X")])
-    fw = Fake(pages=[page([])])
+    interra = Fake(pages=[page([board_item("X", "Interra-Project")])] * 2, values=[issue_node("X")])
+    fw = Fake(pages=[page([None])])
     github.read_all({"Interra-Project": interra, "FormingWorlds": fw})
     assert set(interra.flags + fw.flags) == {
         ("board", github.BOARD_GONE),
@@ -284,16 +288,22 @@ def test_removed_issue_field_reads_as_clear_with_time():
     assert values == {"A": {"Target date": [None, "2026-02-01"], "Start date": ["2026-01-01", "2026-03-01"]}}
 
 
+def test_board_query_asks_for_the_item_total():
+    assert "items(first: 100, after: $after) { totalCount pageInfo" in github.BOARD_QUERY
+
+
 @pytest.mark.parametrize("where", ["fields", "values", "issue_fields", "issue_values"])
-def test_truncated_lists_stop_the_read(where):
+def test_truncated_lists_stop_the_read(where, slept):
     if where in ("fields", "values"):
         p = page([board_item("A")])
         if where == "fields":
             p["fields"]["pageInfo"] = MORE
         else:
             p["items"]["nodes"][0]["fieldValues"]["pageInfo"] = MORE
+        fake = Fake(pages=[p])
         with pytest.raises(github.TruncatedRead):
-            github.read_board(Fake(pages=[p]), "o", 1)
+            github.read_board(fake, "o", 1)
+        assert slept == [] and len(fake.cursors) == 1  # not read again
     elif where == "issue_fields":
 
         class C:
@@ -307,6 +317,36 @@ def test_truncated_lists_stop_the_read(where):
         node["issueFieldValues"]["pageInfo"] = MORE
         with pytest.raises(github.TruncatedRead):
             github.read_issue_values(Fake(values=[node]), ["A"])
+
+
+FULL = [board_item("A"), board_item("B")]
+
+
+@pytest.mark.parametrize(
+    "short",
+    [
+        [page([], total=0)],  # the whole board empty
+        [page(FULL[:1], more=True, total=2), page([], total=0)],  # a later page empty
+        [page(FULL[:1], more=True, total=2), page([], total=2)],  # fewer items than the total
+        [page(FULL[:1], more=True, total=2), page(FULL[1:], total=3)],  # the total changed
+        [page([], more=True, total=2), page(FULL[1:], total=2)],  # an empty first page
+        [page(FULL + [board_item("C")], total=2)],  # more items than the total
+    ],
+)
+def test_short_board_read_is_tried_again(short, slept):
+    fake = Fake(pages=[*short, page(FULL)])
+    pid, fields, items, skipped = github.read_board(fake, "Interra-Project", 2)
+    assert [i[0] for i in items] == ["A", "B"] and skipped == 0
+    assert slept == [github.BOARD_READ_WAIT]
+
+
+def test_short_board_read_stops_after_the_attempts(slept):
+    fake = Fake(pages=[page([], total=0)] * github.BOARD_READ_ATTEMPTS)
+    with pytest.raises(github.ShortBoardRead, match="0 items read, total 0"):
+        github.read_board(fake, "Interra-Project", 1)
+    assert (github.BOARD_READ_ATTEMPTS, github.BOARD_READ_WAIT) == (6, 10)  # the README states both
+    assert len(fake.cursors) == github.BOARD_READ_ATTEMPTS
+    assert slept == [github.BOARD_READ_WAIT] * (github.BOARD_READ_ATTEMPTS - 1)
 
 
 def test_missing_page_info_is_an_error():

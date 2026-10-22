@@ -31,18 +31,25 @@ Effort follows Workload in one direction: a hand edit of Effort on an issue that
   A board does not record when a value was cleared, so a cleared board value loses to a value set at another place in the same interval.
   The issue timeline read covers the last 100 field events; an older change has no time and loses.
 - A value that every changed place already shows, after the name map, wins without a conflict.
-- A cleared value is cleared in the other places too.
+- A cleared value is cleared in the other places too, except where a place is held back (see below).
   A field that is emptied as a whole at one place (all of its 5 or more values, see below) is filled again from the others.
 - A field that is missing at a place is skipped there, never read as empty, and the run log names it; a value without a matching option is listed in `report.txt` as skipped.
   A field with a new id (deleted and created again), or a field that held 5 or more values and now holds none, does not clear the other places.
 - An issue that is not on a board, or cannot be read, keeps its record for that board.
-  When it is there again with the field, its empty fields receive the agreed values, an unchanged value counts as no change, and a different value wins only when it is newer than the agreed value (an agreed value of unknown time keeps its place).
+  When it is there again with the field, its empty fields receive the agreed values, an unchanged value counts as no change, and a different value wins only when it is newer than the agreed value (an agreed value of unknown time keeps its place); an issue field that was cleared after the agreed value counts as a clear, since its removal event has a time.
   On a field that was created again, the first value counts as a change, as on a new board.
   An issue that is on no board for 90 days is dropped from the state.
 - A list longer than one page of the API (fields of a board, values of an item, issue fields, issue field values) stops the read with an error, so a cut-off list is never read as empty values.
-- A board read is short when it finds no items, a number of items other than the board's total, or a total that changes between pages, since the API can return an empty page without an error.
+- A board read is short when it finds no items, a number of items other than the board's total, a total that changes between pages, or an issue item with no values or a number of values other than its total (every item holds at least its title), since the API can return an empty page without an error.
   The board is then read again, up to 6 reads in all, 10 seconds apart, and the run stops with exit code 2 before any write when all 6 are short.
   So a board with no items stops every run, and the retries count against the 10 minutes of a run.
+  A read of issue field values is short when it returns fewer issues than asked for, or an issue with a number of values other than its total; it is read again in the same way.
+  An issue that lacks the value of a synced field whose latest event set it counts as unread for its issue fields.
+- A board place of an issue whose synced fields held 2 or more values in the state and all read empty now is held back for the run, as if the place did not hold the issue, and `report.txt` lists it; fields that were created again or emptied as a whole do not count.
+  The issue fields of an issue are held back in the same way when one synced field that held a value reads empty without a removal event, since a clear of an issue field always has one.
+  So a read that drops all values of a board item that held 2 or more, or a value of an issue field, clears nothing; when the place reads the same in the next run, it receives the agreed values.
+  A board item with 1 synced value that reads empty, or a read that drops some but not all values of a board item, is not caught: it counts as a clear.
+  A hand clear of all synced fields of an issue on one board is therefore undone; clear them one by one in different runs, or on the issue.
 - A run that plans more than 20 writes stops and writes nothing (exit code 3).
   Read the plan in `report.txt` in the state repository, then start the workflow by hand with `apply` and `allow_bulk`.
   The state then holds the approved writes that are not done yet, and the scheduled runs write them, at most 400 values per run.
@@ -58,7 +65,10 @@ Effort follows Workload in one direction: a hand edit of Effort on an issue that
   Issue links, values and error text stay in the state repository.
 - A run reads the places one after the other and then writes.
   An edit made in the minutes of a run can be overwritten by that run; the next run then sees the written value as agreed.
-- Exit codes: 0 done, 1 some writes failed, 2 the read, the state file, a token or the run failed, 3 too many changes, 4 done but some writes are parked (the workflow shows it as a warning), 143 or 130 stopped by a signal.
+- A run with `apply` that starts less than 50 minutes after the start of the last run that tried a write stops before the read with exit code 5 (`--min-interval`, 0 turns the check off); a run without `apply` is not limited.
+  A scheduled run that stops this way shows a notice; a run started by hand fails, so start it again later.
+  A stored start time more than 5 minutes later than the run's own start is an error (exit code 2) on every run with `apply`; to recover, delete `applied_at` from `state.json` in the state repository.
+- Exit codes: 0 done, 1 some writes failed, 2 the read, the state file, a token or the run failed, 3 too many changes, 4 done but some writes are parked (the workflow shows it as a warning), 5 too soon after the last run that wrote, 143 or 130 stopped by a signal.
 
 ## Setup
 
@@ -72,7 +82,7 @@ Effort follows Workload in one direction: a hand edit of Effort on an issue that
 4. Create `Interra-Project/board-sync-state` as a private repository with one commit on `main`, for example a README.
 5. Store all 3 values in the environment only, not as repository secrets: the App client id as the variable `BOARD_SYNC_CLIENT_ID`, the App private key as the secret `BOARD_SYNC_PRIVATE_KEY`, and the private key of an SSH deploy key with write access to `Interra-Project/board-sync-state` as the secret `STATE_DEPLOY_KEY`.
 
-The workflow runs at minute 7 and 37 of every hour on `main`; a run on another branch is skipped.
+The workflow runs at minute 11 of every hour on `main`; a run on another branch is skipped.
 A run started by hand from the Actions tab only plans, unless `apply` is set.
 GitHub turns off scheduled workflows in a public repository after 60 days without activity in that repository.
 Check the date of the last run in the Actions tab of this repository, and enable the workflow again there when it is off.

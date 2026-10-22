@@ -25,7 +25,7 @@ query($owner: String!, $number: Int!, $after: String) {
       ... on ProjectV2SingleSelectField { options { id name } } } }
     items(first: 100, after: $after) { totalCount pageInfo { hasNextPage endCursor } nodes { id
       content { ... on Issue { id url repository { owner { login } } } }
-      fieldValues(first: 100) { pageInfo { hasNextPage } nodes {
+      fieldValues(first: 100) { totalCount pageInfo { hasNextPage } nodes {
         ... on ProjectV2ItemFieldDateValue { date updatedAt field { ... on ProjectV2FieldCommon { name } } }
         ... on ProjectV2ItemFieldSingleSelectValue { name updatedAt field { ... on ProjectV2FieldCommon { name } } }
       } } } } } }
@@ -41,7 +41,7 @@ query($org: String!) { organization(login: $org) { issueFields(first: 100) { pag
 ISSUE_VALUES_QUERY = (
     """
 query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { id
-  issueFieldValues(first: 50) { pageInfo { hasNextPage } nodes {
+  issueFieldValues(first: 50) { totalCount pageInfo { hasNextPage } nodes {
     ... on IssueFieldDateValue { value field { ... on IssueFieldDate { name } } }
     ... on IssueFieldSingleSelectValue { name field { ... on IssueFieldSingleSelect { name } } } } }
   timelineItems(last: 100, itemTypes: [ISSUE_FIELD_ADDED_EVENT, ISSUE_FIELD_CHANGED_EVENT,
@@ -71,19 +71,45 @@ class TruncatedRead(RuntimeError):
     """A list in a response was longer than the request asked for."""
 
 
-class ShortBoardRead(RuntimeError):
-    """A board read gave no items, or a number of items other than the board total."""
+class ShortRead(RuntimeError):
+    """A read gave fewer entries than the API reports, or none where there must be some."""
 
 
-# Attempts of one board read, and seconds between them, when a read comes back short.
-BOARD_READ_ATTEMPTS = 6
-BOARD_READ_WAIT = 10
+class ShortBoardRead(ShortRead):
+    """A board read gave no items, a number of items other than the board total, or an item without values."""
+
+
+class ShortIssueRead(ShortRead):
+    """A read of issue field values gave fewer values or issues than asked for."""
+
+
+# Attempts of one read, and seconds between them, when a read comes back short.
+READ_ATTEMPTS = 6
+READ_WAIT = 10
+
+# Issue field names that the sync reads, for the check of values against their latest events.
+ISSUE_NAMES = frozenset(spec["places"]["issue"] for spec in config.FIELDS.values() if "issue" in spec["places"])
 
 
 def _check_page(conn, what):
     """Raise ``TruncatedRead`` if a connection has more nodes than were read."""
     if conn["pageInfo"]["hasNextPage"]:
         raise TruncatedRead(what)
+
+
+def _count(nodes):
+    """Number of entries in a node list that are not null; a null list counts 0."""
+    return sum(n is not None for n in nodes or ())
+
+
+def _read_again(read):
+    """Call ``read`` until it does not raise ``ShortRead``, at most ``READ_ATTEMPTS`` times in all."""
+    for _ in range(READ_ATTEMPTS - 1):
+        try:
+            return read()
+        except ShortRead:
+            time.sleep(READ_WAIT)
+    return read()
 
 
 class Client:
@@ -194,9 +220,10 @@ def read_board(client, owner, number):
     """Read the fields and the issue items of one project board.
 
     A read that finds no items, a number of items other than the board's
-    ``totalCount``, or a ``totalCount`` that changes between pages, is short:
-    the board is read up to ``BOARD_READ_ATTEMPTS`` times in all, since the
-    API can return an empty page with no error.
+    ``totalCount``, a ``totalCount`` that changes between pages, or an issue
+    item whose values are none or other than their ``totalCount``, is short:
+    the board is read up to ``READ_ATTEMPTS`` times in all, since the API can
+    return an empty page with no error. Every item holds at least its title.
 
     Parameters
     ----------
@@ -221,14 +248,9 @@ def read_board(client, owner, number):
     TruncatedRead
         If a board has more fields, or an item more values, than one page.
     ShortBoardRead
-        If every attempt reads no items, or a number of items other than the total.
+        If every attempt is short.
     """
-    for _ in range(BOARD_READ_ATTEMPTS - 1):
-        try:
-            return _read_board_once(client, owner, number)
-        except ShortBoardRead:
-            time.sleep(BOARD_READ_WAIT)
-    return _read_board_once(client, owner, number)
+    return _read_again(lambda: _read_board_once(client, owner, number))
 
 
 def _read_board_once(client, owner, number):
@@ -263,9 +285,13 @@ def _read_board_once(client, owner, number):
             if "id" not in content:
                 skipped += 1  # draft issue, pull request, or an issue the token cannot read
                 continue
-            _check_page(node["fieldValues"], f"values of an item on board {number}")
+            fv = node.get("fieldValues") or {"totalCount": 0, "pageInfo": {"hasNextPage": False}, "nodes": []}
+            _check_page(fv, f"values of an item on board {number}")
+            got = _count(fv["nodes"])
+            if fv["totalCount"] == 0 or got != fv["totalCount"]:
+                raise ShortBoardRead(f"board {number}: an item has {got} values, total {fv['totalCount']}")
             values = {}
-            for v in node["fieldValues"]["nodes"]:
+            for v in fv["nodes"]:
                 if v and v.get("field"):
                     values[v["field"]["name"]] = [v.get("date", v.get("name")), v.get("updatedAt")]
             org = content["repository"]["owner"]["login"]
@@ -310,7 +336,10 @@ def read_issue_values(client, ids, batch=25):
     """Read org issue field values and their change times.
 
     A field whose latest event is a removal reads as ``[None, removed_at]``,
-    so a clear has its own time.
+    so a clear has its own time. A batch that returns fewer issues than
+    asked for, or an issue with fewer values than its ``totalCount``, is
+    read again, up to ``READ_ATTEMPTS`` times in all. An issue that lacks
+    the value of a synced field whose latest event set it counts as unread.
 
     Parameters
     ----------
@@ -326,30 +355,55 @@ def read_issue_values(client, ids, batch=25):
     tuple
         Issue id to ``{field name: [value, changed_at]}``, and the number of
         issues that could not be read.
+
+    Raises
+    ------
+    ShortIssueRead
+        If every attempt of a batch is short.
     """
     out, unread = {}, 0
     for i in range(0, len(ids), batch):
-        data = client.post(ISSUE_VALUES_QUERY, {"ids": ids[i : i + batch]}, allow_not_found=True)
-        for node in data["nodes"]:
-            if not node:
-                unread += 1
-                continue
-            _check_page(node["issueFieldValues"], "issue field values")
-            times, removed = {}, set()
-            for ev in node["timelineItems"]["nodes"]:
-                name = ((ev or {}).get("issueField") or {}).get("name")
-                if name and ev["createdAt"] >= times.get(name, ""):
-                    times[name] = ev["createdAt"]
-                    if ev.get("__typename") == "IssueFieldRemovedEvent":
-                        removed.add(name)
-                    else:
-                        removed.discard(name)
-            values = {name: [None, times[name]] for name in removed}
-            for v in node["issueFieldValues"]["nodes"]:
-                if v and v.get("field"):
-                    name = v["field"]["name"]
-                    values[name] = [v.get("value", v.get("name")), times.get(name)]
-            out[node["id"]] = values
+        part = ids[i : i + batch]
+        values, n = _read_again(lambda part=part: _read_issue_batch(client, part))
+        out.update(values)
+        unread += n
+    return out, unread
+
+
+def _read_issue_batch(client, ids):
+    """Read the issue field values of one batch once; see ``read_issue_values``."""
+    out, unread = {}, 0
+    data = client.post(ISSUE_VALUES_QUERY, {"ids": ids}, allow_not_found=True)
+    if len(data["nodes"]) != len(ids):
+        raise ShortIssueRead(f"{len(data['nodes'])} issues read, {len(ids)} asked for")
+    for node in data["nodes"]:
+        if not node:
+            unread += 1
+            continue
+        conn = node.get("issueFieldValues")
+        if conn is None or conn.get("nodes") is None:
+            raise ShortIssueRead("an issue has no field value list")
+        _check_page(conn, "issue field values")
+        if _count(conn["nodes"]) != conn["totalCount"]:
+            raise ShortIssueRead(f"an issue has {_count(conn['nodes'])} field values, total {conn['totalCount']}")
+        times, removed = {}, set()
+        for ev in node["timelineItems"]["nodes"]:
+            name = ((ev or {}).get("issueField") or {}).get("name")
+            if name and ev["createdAt"] >= times.get(name, ""):
+                times[name] = ev["createdAt"]
+                if ev.get("__typename") == "IssueFieldRemovedEvent":
+                    removed.add(name)
+                else:
+                    removed.discard(name)
+        values = {name: [None, times[name]] for name in removed}
+        for v in conn["nodes"]:
+            if v and v.get("field"):
+                name = v["field"]["name"]
+                values[name] = [v.get("value", v.get("name")), times.get(name)]
+        if any(name not in values for name in (ISSUE_NAMES & times.keys()) - removed):
+            unread += 1  # a value that its latest event set is absent from the read
+            continue
+        out[node["id"]] = values
     return out, unread
 
 

@@ -5,7 +5,9 @@ writes only the snapshot and report files it is given. With ``--apply`` it
 writes the plan, unless the plan has more than ``--max-changes`` writes; then
 it stops with exit code 3. A person reads the plan and reruns with
 ``--allow-bulk``; the state then holds the approved writes, and the next runs
-write them in batches of ``--limit``.
+write them in batches of ``--limit``. A run with ``--apply`` that starts less
+than ``--min-interval`` minutes after the start of the last run that wrote
+stops before the read, with exit code 5.
 """
 
 import argparse
@@ -164,7 +166,7 @@ def apply(args, clients, snap, result, active, parked, state, now, summary, deta
     """
     old_fails = state.get("failures", {})
     batch, later = active[: args.limit], active[args.limit :]
-    failed, done_keys, done, in_row, late = [], set(), 0, 0, False
+    failed, done_keys, done, in_row, late, tried = [], set(), 0, 0, False, False
     try:
         for n, w in enumerate(batch):
             if in_row >= STOP_AFTER_FAILURES:
@@ -174,6 +176,7 @@ def apply(args, clients, snap, result, active, parked, state, now, summary, deta
                 break
             if n and args.pause:
                 time.sleep(args.pause)
+            tried = True
             try:
                 github.write(clients, snap, w)
                 done_keys.add(write_key(w))
@@ -201,6 +204,10 @@ def apply(args, clients, snap, result, active, parked, state, now, summary, deta
         idle = 0 if progress else (0 if args.allow_bulk else state.get("bulk_idle", 0)) + 1
         keep = left and idle < BULK_IDLE_RUNS
         result.state["bulk_keys"], result.state["bulk_idle"] = (left, idle) if keep else ([], 0)
+        # Only a run that tried a write moves the start of the interval.
+        last = args.started_at.isoformat(timespec="seconds") if tried else state.get("applied_at")
+        if last:
+            result.state["applied_at"] = last
         save_state(args.state, result.state)
     if in_row >= STOP_AFTER_FAILURES:
         summary.append(f"stopped after {in_row} failed writes in a row")
@@ -240,6 +247,12 @@ def plan_and_apply(args, clients, snap, out):
     summary += [f"reset: {key} / {fkey} is treated as new, its old values are ignored" for key, fkey in result.resets]
     if result.skipped:
         summary.append(f"skipped: {len(result.skipped)} values without an option at the place")
+    if result.held:
+        summary.append(f"held back: {len(result.held)} places of an issue with values missing, listed in the report")
+        detail += [
+            f"held back {snap['items'][i]['url']} {config.BOARDS.get(p, {}).get('title', 'issue field')}: values missing from the read"
+            for i, p in result.held
+        ]
     if parked:
         summary.append(f"parked: {len(parked)} writes that failed in {PARK_AFTER} runs, listed in the report")
     approved_keys = set(state.get("bulk_keys", []))
@@ -255,6 +268,29 @@ def plan_and_apply(args, clients, snap, out):
         code = apply(args, clients, snap, result, active, parked, state, now, summary, detail)
     emit(args, summary, detail, out)
     return code or (4 if parked and args.apply else 0)
+
+
+# A stored start time later than this run's start by more than this is a damaged state.
+CLOCK_SLACK = timedelta(minutes=5)
+
+
+def too_soon(args):
+    """Return the start time of the last run that wrote, when it is less than ``args.min_interval`` minutes ago.
+
+    Raises
+    ------
+    StateError
+        If the stored time is more than ``CLOCK_SLACK`` later than this run's start.
+    """
+    if not args.apply or args.min_interval <= 0:
+        return None
+    last = load_state(args.state).get("applied_at")
+    if not last:
+        return None
+    gap = args.started_at - datetime.fromisoformat(last)
+    if gap < -CLOCK_SLACK:
+        raise StateError(f"applied_at: the last run that wrote started at {last}, after this run")
+    return last if gap < timedelta(minutes=args.min_interval) else None
 
 
 def safe_emit(args, line, detail, out):
@@ -285,8 +321,19 @@ def run(args, clients, out=sys.stdout):
     -------
     int
         Exit code: 0 done, 1 some writes failed, 2 the read or the run failed,
-        3 too many changes, 4 done but some writes are parked.
+        3 too many changes, 4 done but some writes are parked, 5 too soon
+        after the last run that wrote.
     """
+    try:
+        last = too_soon(args)
+    except Exception as exc:  # noqa: BLE001  the summary names the error type only
+        safe_emit(args, f"run failed: {type(exc).__name__}", traceback.format_exc(), out)
+        return 2
+    if last:
+        print(
+            f"skipped: the last run that wrote started at {last}, less than {args.min_interval:g} minutes ago", file=out
+        )
+        return 5
     try:
         snap = github.read_all(clients)
     except Exception as exc:  # noqa: BLE001  the summary names the error type only
@@ -315,10 +362,16 @@ def main(argv=None, env=os.environ):
     parser.add_argument("--limit", type=int, default=400, help="most writes in one run; the rest wait")
     parser.add_argument("--pause", type=float, default=0.0, help="seconds between writes")
     parser.add_argument("--deadline", type=float, default=600.0, help="seconds from start after which writes stop")
+    parser.add_argument(
+        "--min-interval",
+        type=float,
+        default=50.0,
+        help="minutes from the start of the last run that wrote to the next run with --apply",
+    )
     parser.add_argument("--summary", action="store_true", help="print counts only, no issue data")
     parser.add_argument("--report", help="file for the full report with issue data")
     args = parser.parse_args(argv)
-    args.started = time.monotonic()
+    args.started, args.started_at = time.monotonic(), datetime.now(UTC)
     if env.get("GITHUB_ACTIONS") == "true":
         args.summary = True  # a job log can be public
     old = signal.signal(signal.SIGTERM, _terminate)

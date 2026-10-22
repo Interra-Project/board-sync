@@ -336,6 +336,10 @@ FULL = [board_item("A"), board_item("B")]
         [page(FULL + [board_item("C")], total=2)],  # more items than the total
         [page([board_item("A") | {"fieldValues": {"totalCount": 0, "pageInfo": DONE, "nodes": []}}, FULL[1]])],
         [page([board_item("A") | {"fieldValues": {"totalCount": 3, "pageInfo": DONE, "nodes": [{}]}}, FULL[1]])],
+        [page([board_item("A") | {"fieldValues": {"totalCount": 1, "pageInfo": DONE, "nodes": [{}] * 3}}, FULL[1]])],
+        [page([board_item("A") | {"fieldValues": {"totalCount": 3, "pageInfo": DONE, "nodes": [None] * 3}}, FULL[1]])],
+        [page([board_item("A") | {"fieldValues": {"totalCount": 3, "pageInfo": DONE, "nodes": None}}, FULL[1]])],
+        [page([board_item("A") | {"fieldValues": None}, FULL[1]])],
     ],
 )
 def test_short_board_read_is_tried_again(short, slept):
@@ -363,6 +367,11 @@ SET_START = {"__typename": "IssueFieldAddedEvent", "createdAt": "t1", "issueFiel
     [
         {"nodes": []},  # fewer issues than asked for
         {"nodes": [issue_node("A") | {"issueFieldValues": {"totalCount": 1, "pageInfo": DONE, "nodes": []}}]},
+        {"nodes": [issue_node("A") | {"issueFieldValues": {"totalCount": 1, "pageInfo": DONE, "nodes": [START] * 2}}]},
+        {"nodes": [issue_node("A") | {"issueFieldValues": {"totalCount": 1, "pageInfo": DONE, "nodes": [None]}}]},
+        {"nodes": [issue_node("A") | {"issueFieldValues": {"totalCount": 0, "pageInfo": DONE, "nodes": None}}]},
+        {"nodes": [issue_node("A") | {"issueFieldValues": None}]},
+        {"nodes": [None, None]},  # more issues than asked for
     ],
 )
 def test_short_issue_read_is_tried_again(short, slept):

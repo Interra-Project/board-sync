@@ -235,13 +235,15 @@ def reset_places(snap, state):
 
 
 def held_places(snap, state, reset):
-    """Find issue places whose synced values all read empty while the state holds several.
+    """Find places of an issue whose synced values read empty with no sign of a clear.
 
-    A place counts when its synced fields held at least ``config.WIPE_MIN``
+    A board counts when its synced fields held at least ``config.WIPE_MIN``
     values in the state, not counting reset fields and places marked gone,
-    and every synced field there reads empty now. Such a place is treated as
-    if it did not hold the issue in this run, so the empty read clears no
-    other place; when it reads empty again, it receives the agreed values.
+    and every synced field there reads empty now. The issue place counts when
+    one such field reads empty without a removal time, since a clear of an
+    issue field always has one. Such a place is treated as if it did not
+    hold the issue in this run, so the empty read clears no other place; when
+    it reads the same in the next run, it receives the agreed values.
 
     Parameters
     ----------
@@ -260,15 +262,18 @@ def held_places(snap, state, reset):
     out, old = set(), state.get("items", {})
     for iid, item in snap["items"].items():
         for place in item["places"]:
-            held = filled = 0
+            held = filled = lost = 0
             for fkey, spec in config.FIELDS.items():
                 if place not in scope(snap, item, fkey):
                     continue
-                filled += raw_value(item, place, spec["places"][place])[0] is not None
+                value, at = raw_value(item, place, spec["places"][place])
+                filled += value is not None
                 rec = old.get(iid, {}).get(fkey, {})
-                if (place_key(item, place), fkey) not in reset and place not in rec.get("gone", ()):
-                    held += rec.get("seen", {}).get(place) is not None
-            if held >= config.WIPE_MIN and filled == 0:
+                counted = (place_key(item, place), fkey) not in reset and place not in rec.get("gone", ())
+                if counted and rec.get("seen", {}).get(place) is not None:
+                    held += 1
+                    lost += value is None and at is None
+            if lost if place == "issue" else held >= config.WIPE_MIN and filled == 0:
                 out.add((iid, place))
     return out
 

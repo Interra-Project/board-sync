@@ -65,6 +65,7 @@ jobs:
           BOARD_SYNC_TOKEN_INTERRA_PROJECT: ${{ steps.interra.outputs.token }}
           BOARD_SYNC_TOKEN_FORMINGWORLDS: ${{ steps.formingworlds.outputs.token }}
           APPLY: ${{ github.event_name == 'schedule' || inputs.apply }}
+          EVENT: ${{ github.event_name }}
           BULK: ${{ github.event_name == 'workflow_dispatch' && inputs.allow_bulk }}
         run: |
           flags="--state state/state.json --snapshot-dir state --report state/report.txt --summary --pause 1"
@@ -76,9 +77,11 @@ jobs:
             echo "::warning::Some writes are parked after repeated failures; see report.txt in the state repository."
             code=0
           fi
-          if [ "$code" = 5 ]; then
-            echo "::notice::Skipped: the last apply run started less than 50 minutes ago."
+          if [ "$code" = 5 ] && [ "$EVENT" = schedule ]; then
+            echo "::notice::Skipped: the last run that wrote started less than 50 minutes ago."
             code=0
+          elif [ "$code" = 5 ]; then
+            echo "::error::Nothing done: the last run that wrote started less than 50 minutes ago; start this run again later."
           fi
           exit "$code"
 

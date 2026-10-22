@@ -76,8 +76,8 @@ DERIVED = {
 # treated as a new, empty field, not as a mass clear.
 RESET_MIN = 5
 
-# An issue place that held at least this many synced values and now reads
-# none is held back for the run, not read as a clear of each field.
+# A board place of an issue that held at least this many synced values and
+# now reads none is held back for the run, not read as a clear of each field.
 WIPE_MIN = 2
 
 # An issue that is on no board for this many days is dropped from the state.

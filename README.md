@@ -31,7 +31,7 @@ Effort follows Workload in one direction: a hand edit of Effort on an issue that
   A board does not record when a value was cleared, so a cleared board value loses to a value set at another place in the same interval.
   The issue timeline read covers the last 100 field events; an older change has no time and loses.
 - A value that every changed place already shows, after the name map, wins without a conflict.
-- A cleared value is cleared in the other places too.
+- A cleared value is cleared in the other places too, except where a place is held back (see below).
   A field that is emptied as a whole at one place (all of its 5 or more values, see below) is filled again from the others.
 - A field that is missing at a place is skipped there, never read as empty, and the run log names it; a value without a matching option is listed in `report.txt` as skipped.
   A field with a new id (deleted and created again), or a field that held 5 or more values and now holds none, does not clear the other places.
@@ -45,8 +45,10 @@ Effort follows Workload in one direction: a hand edit of Effort on an issue that
   So a board with no items stops every run, and the retries count against the 10 minutes of a run.
   A read of issue field values is short when it returns fewer issues than asked for, or an issue with a number of values other than its total; it is read again in the same way.
   An issue that lacks the value of a synced field whose latest event set it counts as unread for its issue fields.
-- An issue place whose synced fields held 2 or more values in the state and all read empty now is held back for the run, as if the place did not hold the issue, and `report.txt` lists it.
-  So a read that drops the values of one item clears nothing; when the place reads empty in the next run too, it receives the agreed values.
+- A board place of an issue whose synced fields held 2 or more values in the state and all read empty now is held back for the run, as if the place did not hold the issue, and `report.txt` lists it; fields that were created again or emptied as a whole do not count.
+  The issue fields of an issue are held back in the same way when one synced field that held a value reads empty without a removal event, since a clear of an issue field always has one.
+  So a read that drops the values of one item clears nothing; when the place reads the same in the next run, it receives the agreed values.
+  A hand clear of all synced fields of an issue on one board is therefore undone; clear them one by one in different runs, or on the issue.
 - A run that plans more than 20 writes stops and writes nothing (exit code 3).
   Read the plan in `report.txt` in the state repository, then start the workflow by hand with `apply` and `allow_bulk`.
   The state then holds the approved writes that are not done yet, and the scheduled runs write them, at most 400 values per run.
@@ -62,9 +64,10 @@ Effort follows Workload in one direction: a hand edit of Effort on an issue that
   Issue links, values and error text stay in the state repository.
 - A run reads the places one after the other and then writes.
   An edit made in the minutes of a run can be overwritten by that run; the next run then sees the written value as agreed.
-- A run with `apply` that starts less than 50 minutes after the start of the last run with `apply` stops before the read with exit code 5, and the workflow shows it as a notice; a run without `apply` is not limited.
-  This holds for runs started by hand too, and a stored start time later than the run's own start also stops the run.
-- Exit codes: 0 done, 1 some writes failed, 2 the read, the state file, a token or the run failed, 3 too many changes, 4 done but some writes are parked (the workflow shows it as a warning), 5 too soon after the last run with `apply` (the workflow shows it as a notice), 143 or 130 stopped by a signal.
+- A run with `apply` that starts less than 50 minutes after the start of the last run that tried a write stops before the read with exit code 5 (`--min-interval`, 0 turns the check off); a run without `apply` is not limited.
+  A scheduled run that stops this way shows a notice; a run started by hand fails, so start it again later.
+  A stored start time more than 5 minutes later than the run's own start is an error (exit code 2).
+- Exit codes: 0 done, 1 some writes failed, 2 the read, the state file, a token or the run failed, 3 too many changes, 4 done but some writes are parked (the workflow shows it as a warning), 5 too soon after the last run that wrote, 143 or 130 stopped by a signal.
 
 ## Setup
 

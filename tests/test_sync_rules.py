@@ -834,7 +834,7 @@ def test_held_back_place_is_named_in_the_report(mk, monkeypatch, tmp_path):
     monkeypatch.setattr(github, "read_all", lambda clients: lost)
     out, report = io.StringIO(), tmp_path / "r.txt"
     assert cli.run(args(tmp_path, summary=True, report=str(report)), {}, out) == 0
-    assert "held back: 1 issue places" in out.getvalue() and "github.com" not in out.getvalue()
+    assert "held back: 1 places of an issue" in out.getvalue() and "github.com" not in out.getvalue()
     assert "held back https://github.com/Interra-Project/repo/issues/1 Interra Collaboration" in report.read_text()
 
 
@@ -849,12 +849,14 @@ def test_apply_run_too_soon_after_the_last_stops_before_the_read(mk, monkeypatch
     assert cli.run(first, {}, io.StringIO()) == 0
     stamp = json.loads((tmp_path / "state.json").read_text())["applied_at"]
     assert stamp == first.started_at.isoformat(timespec="seconds")
-    for gap, code in ((49, 5), (-1, 5), (51, 0)):
+    for gap, code in ((49, 5), (-4, 5), (-6, 2), (50, 0)):
         later = args(tmp_path, apply=True, min_interval=50.0, started_at=first.started_at + timedelta(minutes=gap))
         out = io.StringIO()
         assert cli.run(later, {}, out) == code
+        if code == 2:
+            assert "the last run that wrote started at" in out.getvalue() and len(reads) == 1
         if code == 5:
-            assert out.getvalue() == f"skipped: the last apply run started at {stamp}, less than 50 minutes ago\n"
+            assert out.getvalue() == f"skipped: the last run that wrote started at {stamp}, less than 50 minutes ago\n"
             assert len(reads) == 1
         first = later if code == 0 else first
     assert cli.run(args(tmp_path, min_interval=50.0), {}, io.StringIO()) == 0  # a plan without apply is not limited
@@ -875,3 +877,46 @@ def test_min_interval_defaults_to_50_minutes(monkeypatch):
     monkeypatch.setattr(cli, "run", lambda a, c: seen.append(a) or 0)
     assert cli.main([], env={}) == 0
     assert seen[0].min_interval == 50.0 and seen[0].started_at.tzinfo is not None
+
+
+def test_run_without_writes_keeps_the_stamp_and_the_state(mk, monkeypatch, tmp_path):
+    from datetime import timedelta
+
+    s = mk.snap(many(mk, 1))
+    monkeypatch.setattr(github, "read_all", lambda clients: s)
+
+    def write(clients, snap, w):
+        snap["items"][w["issue"]]["places"][w["place"]]["values"][w["field"]] = [w["value"], "t9"]
+
+    monkeypatch.setattr(github, "write", write)
+    first = args(tmp_path, apply=True)
+    cli.run(first, {}, io.StringIO())
+    before = (tmp_path / "state.json").read_text()
+    later = args(tmp_path, apply=True, started_at=first.started_at + timedelta(minutes=70))
+    assert cli.run(later, {}, io.StringIO()) == 0  # nothing left to write
+    assert (tmp_path / "state.json").read_text() == before
+    assert json.loads(before)["applied_at"] == first.started_at.isoformat(timespec="seconds")
+
+
+def test_issue_place_with_a_value_lost_without_a_removal_time_is_held_back(mk):
+    a = mk.item(b1={"Priority": ("Priority: high", "t1")}, issue={"Priority": ("High", "t1")})
+    state = core.plan(mk.snap([a]), {}).state
+    lost = core.plan(mk.snap([mk.item(b1={"Priority": ("Priority: high", "t1")}, issue={})]), state)
+    assert lost.writes == [] and lost.held == [("I1", "issue")]
+    cleared = mk.item(b1={"Priority": ("Priority: high", "t1")}, issue={"Priority": (None, "t2")})
+    r = core.plan(mk.snap([cleared]), state)
+    assert writes(r) == {("b1", "Priority"): None} and r.held == []
+
+
+def test_issue_place_with_all_values_cleared_by_hand_is_not_held_back(mk):
+    a = mk.item(
+        b1={"Start date": ("2026-01-01", "t1"), "Target date": ("2026-02-01", "t1")},
+        issue={"Start date": ("2026-01-01", "t1"), "Target date": ("2026-02-01", "t1")},
+    )
+    state = core.plan(mk.snap([a]), {}).state
+    b = mk.item(
+        b1={"Start date": ("2026-01-01", "t1"), "Target date": ("2026-02-01", "t1")},
+        issue={"Start date": (None, "t2"), "Target date": (None, "t2")},
+    )
+    r = core.plan(mk.snap([b]), state)
+    assert r.held == [] and writes(r) == {("b1", "Start date"): None, ("b1", "Target date"): None}

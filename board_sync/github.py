@@ -97,6 +97,11 @@ def _check_page(conn, what):
         raise TruncatedRead(what)
 
 
+def _count(nodes):
+    """Number of entries in a node list that are not null; a null list counts 0."""
+    return sum(n is not None for n in nodes or ())
+
+
 def _read_again(read):
     """Call ``read`` until it does not raise ``ShortRead``, at most ``READ_ATTEMPTS`` times in all."""
     for _ in range(READ_ATTEMPTS - 1):
@@ -280,10 +285,11 @@ def _read_board_once(client, owner, number):
             if "id" not in content:
                 skipped += 1  # draft issue, pull request, or an issue the token cannot read
                 continue
-            fv = node["fieldValues"]
+            fv = node.get("fieldValues") or {"totalCount": 0, "pageInfo": {"hasNextPage": False}, "nodes": []}
             _check_page(fv, f"values of an item on board {number}")
-            if fv["totalCount"] == 0 or len(fv["nodes"]) != fv["totalCount"]:
-                raise ShortBoardRead(f"board {number}: an item has {len(fv['nodes'])} values, total {fv['totalCount']}")
+            got = _count(fv["nodes"])
+            if fv["totalCount"] == 0 or got != fv["totalCount"]:
+                raise ShortBoardRead(f"board {number}: an item has {got} values, total {fv['totalCount']}")
             values = {}
             for v in node["fieldValues"]["nodes"]:
                 if v and v.get("field"):
@@ -374,10 +380,12 @@ def _read_issue_batch(client, ids):
         if not node:
             unread += 1
             continue
-        conn = node["issueFieldValues"]
+        conn = node.get("issueFieldValues")
+        if conn is None or conn.get("nodes") is None:
+            raise ShortIssueRead("an issue has no field value list")
         _check_page(conn, "issue field values")
-        if len(conn["nodes"]) != conn["totalCount"]:
-            raise ShortIssueRead(f"an issue has {len(conn['nodes'])} field values, total {conn['totalCount']}")
+        if _count(conn["nodes"]) != conn["totalCount"]:
+            raise ShortIssueRead(f"an issue has {_count(conn['nodes'])} field values, total {conn['totalCount']}")
         times, removed = {}, set()
         for ev in node["timelineItems"]["nodes"]:
             name = ((ev or {}).get("issueField") or {}).get("name")

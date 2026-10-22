@@ -40,6 +40,9 @@ Effort follows Workload in one direction: a hand edit of Effort on an issue that
   On a field that was created again, the first value counts as a change, as on a new board.
   An issue that is on no board for 90 days is dropped from the state.
 - A list longer than one page of the API (fields of a board, values of an item, issue fields, issue field values) stops the read with an error, so a cut-off list is never read as empty values.
+- A board read is short when it finds no items, a number of items other than the board's total, or a total that changes between pages, since the API can return an empty page without an error.
+  The board is then read again, up to 6 reads in all, 10 seconds apart, and the run stops with exit code 2 before any write when all 6 are short.
+  So a board with no items stops every run, and the retries count against the 10 minutes of a run.
 - A run that plans more than 20 writes stops and writes nothing (exit code 3).
   Read the plan in `report.txt` in the state repository, then start the workflow by hand with `apply` and `allow_bulk`.
   The state then holds the approved writes that are not done yet, and the scheduled runs write them, at most 400 values per run.

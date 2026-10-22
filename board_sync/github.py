@@ -23,7 +23,7 @@ query($owner: String!, $number: Int!, $after: String) {
     fields(first: 100) { pageInfo { hasNextPage } nodes {
       ... on ProjectV2FieldCommon { id name dataType }
       ... on ProjectV2SingleSelectField { options { id name } } } }
-    items(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { id
+    items(first: 100, after: $after) { totalCount pageInfo { hasNextPage endCursor } nodes { id
       content { ... on Issue { id url repository { owner { login } } } }
       fieldValues(first: 100) { pageInfo { hasNextPage } nodes {
         ... on ProjectV2ItemFieldDateValue { date updatedAt field { ... on ProjectV2FieldCommon { name } } }
@@ -69,6 +69,15 @@ class BoardNotFound(RuntimeError):
 
 class TruncatedRead(RuntimeError):
     """A list in a response was longer than the request asked for."""
+
+
+class ShortBoardRead(RuntimeError):
+    """A board read gave no items, or a number of items other than the board total."""
+
+
+# Attempts of one board read, and seconds between them, when a read comes back short.
+BOARD_READ_ATTEMPTS = 6
+BOARD_READ_WAIT = 10
 
 
 def _check_page(conn, what):
@@ -184,6 +193,11 @@ def _field_type(data_type):
 def read_board(client, owner, number):
     """Read the fields and the issue items of one project board.
 
+    A read that finds no items, a number of items other than the board's
+    ``totalCount``, or a ``totalCount`` that changes between pages, is short:
+    the board is read up to ``BOARD_READ_ATTEMPTS`` times in all, since the
+    API can return an empty page with no error.
+
     Parameters
     ----------
     client : Client
@@ -206,8 +220,21 @@ def read_board(client, owner, number):
         If the board or its org does not exist or the token cannot see it.
     TruncatedRead
         If a board has more fields, or an item more values, than one page.
+    ShortBoardRead
+        If every attempt reads no items, or a number of items other than the total.
     """
+    for _ in range(BOARD_READ_ATTEMPTS - 1):
+        try:
+            return _read_board_once(client, owner, number)
+        except ShortBoardRead:
+            time.sleep(BOARD_READ_WAIT)
+    return _read_board_once(client, owner, number)
+
+
+def _read_board_once(client, owner, number):
+    """Read one board once; see ``read_board``."""
     after, items, fields, pid, skipped = None, [], None, None, 0
+    total, seen = None, 0
     while True:
         # A missing board or org comes back as null data with a NOT_FOUND error.
         data = client.post(BOARD_QUERY, {"owner": owner, "number": number, "after": after}, allow_not_found=BOARD_GONE)
@@ -226,6 +253,11 @@ def read_board(client, owner, number):
                 for f in proj["fields"]["nodes"]
                 if f
             }
+        if total is None:
+            total = proj["items"]["totalCount"]
+        elif proj["items"]["totalCount"] != total:
+            raise ShortBoardRead(f"board {number}: total {proj['items']['totalCount']} on a later page, {total} first")
+        seen += len(proj["items"]["nodes"])
         for node in proj["items"]["nodes"]:
             content = (node or {}).get("content") or {}
             if "id" not in content:
@@ -240,6 +272,8 @@ def read_board(client, owner, number):
             items.append((content["id"], content["url"], org, node["id"], values))
         page = proj["items"]["pageInfo"]
         if not page["hasNextPage"]:
+            if total == 0 or seen != total:
+                raise ShortBoardRead(f"board {number}: {seen} items read, total {total}")
             return pid, fields, items, skipped
         after = page["endCursor"]
 

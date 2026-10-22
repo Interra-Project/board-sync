@@ -176,14 +176,18 @@ def field_ids(snap, old=None):
     return ids
 
 
+def synced_names(place):
+    """Return the field names that the sync writes at one place, derived fields included."""
+    names = [spec["places"][place] for spec in config.FIELDS.values() if place in spec["places"]]
+    return names + [spec["field"] for spec in config.DERIVED.values() if spec["place"] == place]
+
+
 def missing_fields(snap):
     """List configured fields that a place does not have, as ``(place_key, name)``."""
     out = []
     for key in snap["fields"]:
         place = "issue" if key.startswith("issue:") else key
-        names = [spec["places"].get(place) for spec in config.FIELDS.values()]
-        names += [spec["field"] for spec in config.DERIVED.values() if spec["place"] == place]
-        out += [(key, name) for name in names if name and name not in snap["fields"][key]]
+        out += [(key, name) for name in synced_names(place) if name not in snap["fields"][key]]
     return sorted(set(out))
 
 

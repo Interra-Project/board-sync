@@ -85,6 +85,38 @@ These files hold private board data; `.gitignore` keeps them out of commits.
 `scripts/store_state.sh` is the workflow step that stores the files of a run in the state repository.
 `BOARD_SYNC_TOKEN_INTERRA_PROJECT` and `BOARD_SYNC_TOKEN_FORMINGWORLDS` set one token per org.
 
+## Restore
+
+`board_sync.restore` sets the synced fields back to the values of a stored `snapshot.json`: it writes the stored value where a value differs, and clears a field that the snapshot holds empty.
+It cannot tell a sync write from a hand edit, so it also reverts every edit of a synced field made after the snapshot.
+Issues, places and fields that are absent from the stored or the current read are left as they are; the report counts them.
+
+Each commit `Sync run <id>` in `Interra-Project/board-sync-state` holds the `snapshot.json` read before the writes of that run and the `state.json` saved after them; a run that changes nothing makes no commit.
+A bulk approval is written over several runs; its first run is the hand run with `allow_bulk`.
+To undo the writes of run N and of all runs after it:
+
+1. Disable the workflow in the Actions tab, and wait until no run is in progress.
+2. Take `snapshot.json` from the commit of run N, for example `git show <commit>:snapshot.json > snapshot.json`.
+3. Read the plan, and check its counts and the values it reverts:
+
+   ```bash
+   GH_TOKEN=$(gh auth token) python -m board_sync.restore snapshot.json --report restore.txt
+   ```
+
+   The token needs write access to the 3 boards and to the issues of both orgs.
+4. Write it with `--apply --expect <plan id> --report restore.txt`, with the plan id from the first line of the plan.
+   If the plan changed since step 3, the run stops with exit code 3.
+   It waits `--pause` seconds (default 1) between writes, and stops after 5 failed writes in a row.
+   After any stop or failure, go back to step 3; the new plan holds only the writes that are still to do, and the restore is done when a new plan holds no writes apart from skipped values.
+5. Replace `state.json` in the state repository with its version from the commit before run N, or delete it if that commit has none.
+   In the replaced file, set `bulk_keys` to `[]`, `bulk_idle` to `0` and `failures` to `{}`, so no earlier approval covers the undone writes.
+   With the `state.json` of run N or later, the next run reads the restored values as new changes and copies them, clears included, to the other places.
+6. Fix values listed as skipped by hand, start the workflow by hand without `apply`, and read its plan before you enable the workflow again.
+   The next run plans the undone writes again, and a conflict can now go the other way, since the restored values are the newest; more than 20 writes stop a scheduled run until a hand run with `allow_bulk`.
+
+Exit codes of the restore: 0 done, 1 some writes failed, 2 the snapshot, the read or the report file failed, 3 the plan id differs from `--expect`.
+A restore writes a new value or a removal on each issue; the issue timeline keeps the entries of both the sync and the restore.
+
 ## Tests
 
 ```bash

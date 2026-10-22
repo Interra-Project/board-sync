@@ -10,3 +10,4 @@ state/
 snapshot/
 snapshot.json
 report.txt
+restore.txt

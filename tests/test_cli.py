@@ -4,6 +4,7 @@ import argparse
 import io
 import json
 import time
+from datetime import UTC, datetime
 
 import pytest
 
@@ -54,6 +55,8 @@ def args(tmp_path, **kw):
         "pause": 0.0,
         "deadline": 600.0,
         "started": time.monotonic(),
+        "started_at": datetime.now(UTC),
+        "min_interval": 0.0,
         "summary": False,
         "report": None,
     }

@@ -168,6 +168,7 @@ def board_item(iid, org="FormingWorlds"):
         "id": f"item-{iid}",
         "content": {"id": iid, "url": f"u/{iid}", "repository": {"owner": {"login": org}}},
         "fieldValues": {
+            "totalCount": 3,
             "pageInfo": DONE,
             "nodes": [
                 {"date": "2026-01-01", "updatedAt": "t1", "field": {"name": "Start date"}},
@@ -181,7 +182,7 @@ def board_item(iid, org="FormingWorlds"):
 def issue_node(iid, values=(), events=()):
     return {
         "id": iid,
-        "issueFieldValues": {"pageInfo": DONE, "nodes": list(values)},
+        "issueFieldValues": {"totalCount": len(values), "pageInfo": DONE, "nodes": list(values)},
         "timelineItems": {"nodes": list(events)},
     }
 
@@ -248,7 +249,7 @@ def test_read_issue_values_batches():
     class C:
         def post(self, q, v, allow_not_found=False):
             calls.append(v["ids"])
-            return {"nodes": []}
+            return {"nodes": [None] * len(v["ids"])}
 
     github.read_issue_values(C(), ["a", "b", "c"], batch=2)
     assert calls == [["a", "b"], ["c"]]
@@ -288,8 +289,10 @@ def test_removed_issue_field_reads_as_clear_with_time():
     assert values == {"A": {"Target date": [None, "2026-02-01"], "Start date": ["2026-01-01", "2026-03-01"]}}
 
 
-def test_board_query_asks_for_the_item_total():
+def test_queries_ask_for_the_totals():
     assert "items(first: 100, after: $after) { totalCount pageInfo" in github.BOARD_QUERY
+    assert "fieldValues(first: 100) { totalCount pageInfo" in github.BOARD_QUERY
+    assert "issueFieldValues(first: 50) { totalCount pageInfo" in github.ISSUE_VALUES_QUERY
 
 
 @pytest.mark.parametrize("where", ["fields", "values", "issue_fields", "issue_values"])
@@ -331,22 +334,75 @@ FULL = [board_item("A"), board_item("B")]
         [page(FULL[:1], more=True, total=2), page(FULL[1:], total=3)],  # the total changed
         [page([], more=True, total=2), page(FULL[1:], total=2)],  # an empty first page
         [page(FULL + [board_item("C")], total=2)],  # more items than the total
+        [page([board_item("A") | {"fieldValues": {"totalCount": 0, "pageInfo": DONE, "nodes": []}}, FULL[1]])],
+        [page([board_item("A") | {"fieldValues": {"totalCount": 3, "pageInfo": DONE, "nodes": [{}]}}, FULL[1]])],
     ],
 )
 def test_short_board_read_is_tried_again(short, slept):
     fake = Fake(pages=[*short, page(FULL)])
     _, _, items, skipped = github.read_board(fake, "Interra-Project", 2)
     assert [i[0] for i in items] == ["A", "B"] and skipped == 0
-    assert slept == [github.BOARD_READ_WAIT]
+    assert slept == [github.READ_WAIT]
 
 
 def test_short_board_read_stops_after_the_attempts(slept):
-    fake = Fake(pages=[page([], total=0)] * github.BOARD_READ_ATTEMPTS)
+    fake = Fake(pages=[page([], total=0)] * github.READ_ATTEMPTS)
     with pytest.raises(github.ShortBoardRead, match="0 items read, total 0"):
         github.read_board(fake, "Interra-Project", 1)
-    assert (github.BOARD_READ_ATTEMPTS, github.BOARD_READ_WAIT) == (6, 10)  # the README states both
-    assert len(fake.cursors) == github.BOARD_READ_ATTEMPTS
-    assert slept == [github.BOARD_READ_WAIT] * (github.BOARD_READ_ATTEMPTS - 1)
+    assert (github.READ_ATTEMPTS, github.READ_WAIT) == (6, 10)  # the README states both
+    assert len(fake.cursors) == github.READ_ATTEMPTS
+    assert slept == [github.READ_WAIT] * (github.READ_ATTEMPTS - 1)
+
+
+START = {"value": "2026-02-01", "field": {"name": "Start date"}}
+SET_START = {"__typename": "IssueFieldAddedEvent", "createdAt": "t1", "issueField": {"name": "Start date"}}
+
+
+@pytest.mark.parametrize(
+    "short",
+    [
+        {"nodes": []},  # fewer issues than asked for
+        {"nodes": [issue_node("A") | {"issueFieldValues": {"totalCount": 1, "pageInfo": DONE, "nodes": []}}]},
+    ],
+)
+def test_short_issue_read_is_tried_again(short, slept):
+    answers = [short, {"nodes": [issue_node("A", values=[START])]}]
+
+    class C:
+        def post(self, q, v, allow_not_found=False):
+            return answers.pop(0)
+
+    values, unread = github.read_issue_values(C(), ["A"])
+    assert values == {"A": {"Start date": ["2026-02-01", None]}} and unread == 0
+    assert slept == [github.READ_WAIT]
+
+
+def test_short_issue_read_stops_after_the_attempts(slept):
+    calls = []
+
+    class C:
+        def post(self, q, v, allow_not_found=False):
+            calls.append(v)
+            return {"nodes": []}
+
+    with pytest.raises(github.ShortIssueRead, match="0 issues read, 1 asked for"):
+        github.read_issue_values(C(), ["A"])
+    assert len(calls) == github.READ_ATTEMPTS and slept == [github.READ_WAIT] * (github.READ_ATTEMPTS - 1)
+
+
+def test_issue_without_a_value_its_latest_event_set_is_unread():
+    other = {"__typename": "IssueFieldAddedEvent", "createdAt": "t1", "issueField": {"name": "Notes"}}
+    gone = {"__typename": "IssueFieldRemovedEvent", "createdAt": "t2", "issueField": {"name": "Start date"}}
+    nodes = [
+        issue_node("A", events=[SET_START]),  # the read lost the value
+        issue_node("B", values=[START], events=[SET_START]),
+        issue_node("C", events=[other]),  # not a synced field
+        issue_node("D", events=[SET_START, gone]),  # removed after it was set
+    ]
+    values, unread = github.read_issue_values(Fake(values=nodes), ["A", "B", "C", "D"])
+    assert unread == 1 and sorted(values) == ["B", "C", "D"]
+    assert values["B"] == {"Start date": ["2026-02-01", "t1"]} and values["D"] == {"Start date": [None, "t2"]}
+    assert github.ISSUE_NAMES == {"Start date", "Target date", "Priority"}
 
 
 def test_missing_page_info_is_an_error():

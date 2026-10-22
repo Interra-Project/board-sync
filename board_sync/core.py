@@ -35,6 +35,8 @@ class Plan:
         Values that cannot be written because the place lacks the option.
     resets : list of tuple
         ``(place_key, fkey)`` pairs treated as new fields in this run.
+    held : list of tuple
+        ``(issue, place)`` pairs held back in this run, see ``held_places``.
     """
 
     writes: list = field(default_factory=list)
@@ -42,6 +44,7 @@ class Plan:
     conflicts: list = field(default_factory=list)
     skipped: list = field(default_factory=list)
     resets: list = field(default_factory=list)
+    held: list = field(default_factory=list)
 
 
 def to_place(fkey, place, value):
@@ -231,6 +234,45 @@ def reset_places(snap, state):
     return reset
 
 
+def held_places(snap, state, reset):
+    """Find issue places whose synced values all read empty while the state holds several.
+
+    A place counts when its synced fields held at least ``config.WIPE_MIN``
+    values in the state, not counting reset fields and places marked gone,
+    and every synced field there reads empty now. Such a place is treated as
+    if it did not hold the issue in this run, so the empty read clears no
+    other place; when it reads empty again, it receives the agreed values.
+
+    Parameters
+    ----------
+    snap : dict
+        Snapshot of all places.
+    state : dict
+        State of the previous run.
+    reset : set of tuple
+        ``(place_key, fkey)`` pairs from ``reset_places``.
+
+    Returns
+    -------
+    set of tuple
+        ``(issue, place)`` pairs to hold back.
+    """
+    out, old = set(), state.get("items", {})
+    for iid, item in snap["items"].items():
+        for place in item["places"]:
+            held = filled = 0
+            for fkey, spec in config.FIELDS.items():
+                if place not in scope(snap, item, fkey):
+                    continue
+                filled += raw_value(item, place, spec["places"][place])[0] is not None
+                rec = old.get(iid, {}).get(fkey, {})
+                if (place_key(item, place), fkey) not in reset and place not in rec.get("gone", ()):
+                    held += rec.get("seen", {}).get(place) is not None
+            if held >= config.WIPE_MIN and filled == 0:
+                out.add((iid, place))
+    return out
+
+
 def _newest(places, times):
     """Pick the place with the newest change time; ties go by ``PLACE_ORDER``."""
     return max(places, key=lambda p: (times[p] or "", -config.PLACE_ORDER.index(p)))
@@ -333,6 +375,13 @@ def plan(snap, state):
     result = Plan(state={"items": {}, "fields": field_ids(snap, state.get("fields"))})
     reset = reset_places(snap, state)
     result.resets = sorted(reset)
+    held = held_places(snap, state, reset)
+    result.held = sorted(held)
+    if held:
+        items = {iid: dict(item) for iid, item in snap["items"].items()}
+        for iid, place in held:
+            items[iid]["places"] = {p: v for p, v in items[iid]["places"].items() if p != place}
+        snap = {**snap, "items": items}
     old = state.get("items", {})
     now = snap.get("read_at")
     for iid, entry in old.items():

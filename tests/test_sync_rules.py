@@ -777,3 +777,101 @@ def test_skip_line_names_the_derived_field(mk, monkeypatch, tmp_path):
     out = io.StringIO()
     cli.run(args(tmp_path), {}, out)
     assert "issue Effort: no option 'Low'" in out.getvalue()
+
+
+B1 = {"Category": ("Tech", "t1"), "Start date": ("2026-01-01", "t1")}
+
+
+def two_values(mk, **extra):
+    return mk.item(
+        b1={"Category": ("Tech", "t1"), "Start date": ("2026-01-01", "t1")},
+        b2={"Category": ("Tech", "t1"), "Start date": ("2026-01-01", "t1")},
+        b7={"Start date": ("2026-01-01", "t1")},
+        **extra,
+    )
+
+
+def test_place_with_all_values_lost_is_held_back(mk):
+    state = core.plan(mk.snap([two_values(mk)]), {}).state
+    lost = mk.item(b1=B1, b2={}, b7={"Start date": ("2026-01-01", "t1")})
+    r = core.plan(mk.snap([lost]), state)
+    assert r.writes == [] and r.held == [("I1", "b2")]
+    assert config.WIPE_MIN == 2  # the README states it
+    # Read in full again: no change. Read empty again: the place receives the agreed values.
+    again = core.plan(mk.snap([two_values(mk)]), r.state)
+    assert again.writes == [] and again.held == []
+    refill = core.plan(mk.snap([lost]), r.state)
+    assert writes(refill) == {("b2", "Category"): "Tech", ("b2", "Start date"): "2026-01-01"} and refill.held == []
+
+
+def test_place_with_one_value_cleared_is_not_held_back(mk):
+    a = mk.item(b1={"Category": ("Tech", "t1")}, b2={"Category": ("Tech", "t1")})
+    state = core.plan(mk.snap([a]), {}).state
+    r = core.plan(mk.snap([mk.item(b1={"Category": ("Tech", "t1")}, b2={})]), state)
+    assert writes(r) == {("b1", "Category"): None} and r.held == []
+
+
+def test_place_with_a_value_left_or_a_new_value_is_not_held_back(mk):
+    state = core.plan(mk.snap([two_values(mk)]), {}).state
+    one_left = mk.item(b1=B1, b2={"Category": ("Tech", "t1")}, b7={"Start date": ("2026-01-01", "t1")})
+    assert core.plan(mk.snap([one_left]), state).held == []
+    new = mk.item(b1=B1, b2={"Release": ("Interra 2027", "t2")}, b7={"Start date": ("2026-01-01", "t1")})
+    assert core.plan(mk.snap([new]), state).held == []
+
+
+def test_reset_fields_do_not_count_for_held_back(mk):
+    state = core.plan(mk.snap([two_values(mk)]), {}).state
+    s = mk.snap([mk.item(b1=B1, b2={}, b7={"Start date": ("2026-01-01", "t1")})])
+    s["fields"]["b2"]["Category"]["id"] = "NEW"  # created again: only Start date counts
+    r = core.plan(s, state)
+    assert r.held == [] and ("b2", "category") in r.resets
+
+
+def test_held_back_place_is_named_in_the_report(mk, monkeypatch, tmp_path):
+    state = core.plan(mk.snap([two_values(mk)]), {}).state
+    (tmp_path / "state.json").write_text(json.dumps(state))
+    lost = mk.snap([mk.item(b1=B1, b2={}, b7={"Start date": ("2026-01-01", "t1")})])
+    monkeypatch.setattr(github, "read_all", lambda clients: lost)
+    out, report = io.StringIO(), tmp_path / "r.txt"
+    assert cli.run(args(tmp_path, summary=True, report=str(report)), {}, out) == 0
+    assert "held back: 1 issue places" in out.getvalue() and "github.com" not in out.getvalue()
+    assert "held back https://github.com/Interra-Project/repo/issues/1 Interra Collaboration" in report.read_text()
+
+
+def test_apply_run_too_soon_after_the_last_stops_before_the_read(mk, monkeypatch, tmp_path):
+    from datetime import timedelta
+
+    s = mk.snap(many(mk, 1))
+    reads = []
+    monkeypatch.setattr(github, "read_all", lambda clients: reads.append(1) or s)
+    monkeypatch.setattr(github, "write", lambda c, snap, w: None)
+    first = args(tmp_path, apply=True, min_interval=50.0)
+    assert cli.run(first, {}, io.StringIO()) == 0
+    stamp = json.loads((tmp_path / "state.json").read_text())["applied_at"]
+    assert stamp == first.started_at.isoformat(timespec="seconds")
+    for gap, code in ((49, 5), (-1, 5), (51, 0)):
+        later = args(tmp_path, apply=True, min_interval=50.0, started_at=first.started_at + timedelta(minutes=gap))
+        out = io.StringIO()
+        assert cli.run(later, {}, out) == code
+        if code == 5:
+            assert out.getvalue() == f"skipped: the last apply run started at {stamp}, less than 50 minutes ago\n"
+            assert len(reads) == 1
+        first = later if code == 0 else first
+    assert cli.run(args(tmp_path, min_interval=50.0), {}, io.StringIO()) == 0  # a plan without apply is not limited
+    assert cli.run(args(tmp_path, apply=True, min_interval=0.0), {}, io.StringIO()) == 0
+
+
+def test_too_soon_check_on_a_damaged_state_fails_the_run(monkeypatch, tmp_path):
+    (tmp_path / "state.json").write_text("[1]")
+    monkeypatch.setattr(github, "read_all", lambda clients: pytest.fail("read after a state error"))
+    out = io.StringIO()
+    assert cli.run(args(tmp_path, apply=True, min_interval=50.0, summary=True), {}, out) == 2
+    assert out.getvalue().strip() == "run failed: StateError"
+
+
+def test_min_interval_defaults_to_50_minutes(monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli, "make_clients", lambda env: {})
+    monkeypatch.setattr(cli, "run", lambda a, c: seen.append(a) or 0)
+    assert cli.main([], env={}) == 0
+    assert seen[0].min_interval == 50.0 and seen[0].started_at.tzinfo is not None

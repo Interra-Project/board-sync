@@ -2,7 +2,7 @@ name: Board sync
 
 on:
   schedule:
-    - cron: "7,37 * * * *"
+    - cron: "11 * * * *"
   workflow_dispatch:
     inputs:
       apply:
@@ -74,6 +74,10 @@ jobs:
           python -m board_sync $flags || code=$?
           if [ "$code" = 4 ]; then
             echo "::warning::Some writes are parked after repeated failures; see report.txt in the state repository."
+            code=0
+          fi
+          if [ "$code" = 5 ]; then
+            echo "::notice::Skipped: the last apply run started less than 50 minutes ago."
             code=0
           fi
           exit "$code"

@@ -38,7 +38,7 @@ query($org: String!) { organization(login: $org) { issueFields(first: 100) { pag
   ... on IssueFieldSingleSelect { id name options { id name } } } } } }
 """
 
-# Field events read per issue, the latest first.
+# Field events read per issue: the most recent ones, up to this number.
 TIMELINE_LAST = 100
 
 ISSUE_VALUES_QUERY = (
@@ -87,7 +87,7 @@ class ShortBoardRead(ShortRead):
 
 
 class ShortIssueRead(ShortRead):
-    """A read of issue field values gave fewer values, events or issues than asked for."""
+    """A read of issue field values gave fewer issues than asked for, or a number of values or events other than the total."""
 
 
 # Attempts of one read, and seconds between them, when a read comes back short.
@@ -344,12 +344,14 @@ def read_issue_values(client, ids, batch=25):
 
     A field whose latest event is a removal reads as ``[None, removed_at]``,
     so a clear has its own time. A batch that returns fewer issues than
-    asked for, or an issue with fewer values than its ``totalCount``, is
-    read again, up to ``READ_ATTEMPTS`` times in all. An issue that lacks
+    asked for, an issue with a number of values other than its
+    ``totalCount``, or a timeline with a number of events other than its
+    ``totalCount`` (at most ``TIMELINE_LAST``) or with no ``totalCount``,
+    is read again, up to ``READ_ATTEMPTS`` times in all. An issue that lacks
     the value of a synced field whose latest event set it counts as unread,
     and so does one with a synced value but no event for it while the
-    timeline was read in full. A timeline with fewer events than its
-    ``totalCount`` (at most ``TIMELINE_LAST``) is read again.
+    timeline was read in full; an unread issue is not read again in the
+    same run.
 
     Parameters
     ----------

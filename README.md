@@ -46,6 +46,7 @@ Effort follows Workload in one direction: a hand edit of Effort on an issue that
   A read of issue field values is short when it returns fewer issues than asked for, an issue with a number of values other than its total, or an issue with a number of field events other than its total (at most the last 100); it is read again in the same way.
   An issue that lacks the value of a synced field whose latest event set it counts as unread for its issue fields.
   So does an issue with a value of a synced field but no event for that field, when its timeline holds 100 field events or fewer; so an empty timeline read does not make a value timeless.
+  An unread issue is not read again in the same run; the next run reads it again.
 - A board place of an issue whose synced fields held 2 or more values in the state and all read empty now is held back for the run, as if the place did not hold the issue, and `report.txt` lists it; fields that were created again or emptied as a whole do not count.
   The issue fields of an issue are held back in the same way when one synced field that held a value reads empty without a removal event, since a clear of an issue field always has one.
   So a read that drops all values of a board item that held 2 or more, or a value of an issue field, clears nothing; when the place reads the same in the next run, it receives the agreed values.

@@ -38,21 +38,28 @@ query($org: String!) { organization(login: $org) { issueFields(first: 100) { pag
   ... on IssueFieldSingleSelect { id name options { id name } } } } } }
 """
 
+# Field events read per issue, the latest first.
+TIMELINE_LAST = 100
+
 ISSUE_VALUES_QUERY = (
-    """
+    (
+        """
 query($ids: [ID!]!) { nodes(ids: $ids) { ... on Issue { id
   issueFieldValues(first: 50) { totalCount pageInfo { hasNextPage } nodes {
     ... on IssueFieldDateValue { value field { ... on IssueFieldDate { name } } }
     ... on IssueFieldSingleSelectValue { name field { ... on IssueFieldSingleSelect { name } } } } }
-  timelineItems(last: 100, itemTypes: [ISSUE_FIELD_ADDED_EVENT, ISSUE_FIELD_CHANGED_EVENT,
-                                       ISSUE_FIELD_REMOVED_EVENT]) { nodes {
+  timelineItems(last: __LAST__, itemTypes: [ISSUE_FIELD_ADDED_EVENT, ISSUE_FIELD_CHANGED_EVENT,
+                                            ISSUE_FIELD_REMOVED_EVENT]) { totalCount nodes {
     __typename
     ... on IssueFieldAddedEvent { createdAt issueField { __FIELD_NAME__ } }
     ... on IssueFieldChangedEvent { createdAt issueField { __FIELD_NAME__ } }
     ... on IssueFieldRemovedEvent { createdAt issueField { __FIELD_NAME__ } } } } } }
 }
 """
-).replace("__FIELD_NAME__", _FIELD_NAME)
+    )
+    .replace("__FIELD_NAME__", _FIELD_NAME)
+    .replace("__LAST__", str(TIMELINE_LAST))
+)
 
 
 class GraphQLError(RuntimeError):
@@ -339,7 +346,10 @@ def read_issue_values(client, ids, batch=25):
     so a clear has its own time. A batch that returns fewer issues than
     asked for, or an issue with fewer values than its ``totalCount``, is
     read again, up to ``READ_ATTEMPTS`` times in all. An issue that lacks
-    the value of a synced field whose latest event set it counts as unread.
+    the value of a synced field whose latest event set it counts as unread,
+    and so does one with a synced value but no event for it while the
+    timeline was read in full. A timeline with fewer events than its
+    ``totalCount`` (at most ``TIMELINE_LAST``) is read again.
 
     Parameters
     ----------
@@ -386,8 +396,13 @@ def _read_issue_batch(client, ids):
         _check_page(conn, "issue field values")
         if _count(conn["nodes"]) != conn["totalCount"]:
             raise ShortIssueRead(f"an issue has {_count(conn['nodes'])} field values, total {conn['totalCount']}")
+        timeline = node.get("timelineItems")
+        if timeline is None or timeline.get("nodes") is None:
+            raise ShortIssueRead("an issue has no timeline list")
+        if _count(timeline["nodes"]) != min(timeline["totalCount"], TIMELINE_LAST):
+            raise ShortIssueRead(f"an issue has {_count(timeline['nodes'])} events, total {timeline['totalCount']}")
         times, removed = {}, set()
-        for ev in node["timelineItems"]["nodes"]:
+        for ev in timeline["nodes"]:
             name = ((ev or {}).get("issueField") or {}).get("name")
             if name and ev["createdAt"] >= times.get(name, ""):
                 times[name] = ev["createdAt"]
@@ -402,6 +417,9 @@ def _read_issue_batch(client, ids):
                 values[name] = [v.get("value", v.get("name")), times.get(name)]
         if any(name not in values for name in (ISSUE_NAMES & times.keys()) - removed):
             unread += 1  # a value that its latest event set is absent from the read
+            continue
+        if timeline["totalCount"] <= TIMELINE_LAST and any(values[n][1] is None for n in ISSUE_NAMES & values.keys()):
+            unread += 1  # a synced value with no event in a complete timeline: the read lost events
             continue
         out[node["id"]] = values
     return out, unread

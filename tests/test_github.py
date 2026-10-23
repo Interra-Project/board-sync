@@ -183,7 +183,7 @@ def issue_node(iid, values=(), events=()):
     return {
         "id": iid,
         "issueFieldValues": {"totalCount": len(values), "pageInfo": DONE, "nodes": list(values)},
-        "timelineItems": {"nodes": list(events)},
+        "timelineItems": {"totalCount": len(events), "nodes": list(events)},
     }
 
 
@@ -218,7 +218,7 @@ def test_read_issue_fields_and_values():
                     {"createdAt": "2026-03-01", "issueField": {"name": "Start date"}},
                     {"createdAt": "2026-02-01", "issueField": {"name": "Start date"}},
                     {"createdAt": "2026-02-01", "issueField": None},
-                    None,
+                    {"createdAt": "2026-01-05", "issueField": {"name": "Priority"}},
                 ],
             )
         ],
@@ -228,7 +228,7 @@ def test_read_issue_fields_and_values():
         "Priority": {"id": "S", "type": "select", "options": {"High": "h"}},
     }
     values, unread = github.read_issue_values(fake, ["A", "GONE"])
-    assert values == {"A": {"Start date": ["2026-02-01", "2026-03-01"], "Priority": ["High", None]}}
+    assert values == {"A": {"Start date": ["2026-02-01", "2026-03-01"], "Priority": ["High", "2026-01-05"]}}
     assert unread == 1
 
 
@@ -372,18 +372,45 @@ SET_START = {"__typename": "IssueFieldAddedEvent", "createdAt": "t1", "issueFiel
         {"nodes": [issue_node("A") | {"issueFieldValues": {"totalCount": 0, "pageInfo": DONE, "nodes": None}}]},
         {"nodes": [issue_node("A") | {"issueFieldValues": None}]},
         {"nodes": [None, None]},  # more issues than asked for
+        {"nodes": [issue_node("A", values=[START]) | {"timelineItems": {"totalCount": 2, "nodes": [SET_START]}}]},
+        {"nodes": [issue_node("A", values=[START]) | {"timelineItems": {"totalCount": 1, "nodes": [None]}}]},
+        {"nodes": [issue_node("A", values=[START]) | {"timelineItems": {"totalCount": 1, "nodes": None}}]},
+        {"nodes": [issue_node("A", values=[START]) | {"timelineItems": None}]},
+        {"nodes": [issue_node("A", values=[START]) | {"timelineItems": {"totalCount": 0, "nodes": None}}]},
+        {
+            "nodes": [
+                issue_node("A", values=[START]) | {"timelineItems": {"totalCount": 150, "nodes": [SET_START] * 99}}
+            ]
+        },
     ],
 )
 def test_short_issue_read_is_tried_again(short, slept):
-    answers = [short, {"nodes": [issue_node("A", values=[START])]}]
+    answers = [short, {"nodes": [issue_node("A", values=[START], events=[SET_START])]}]
 
     class C:
         def post(self, q, v, allow_not_found=False):
             return answers.pop(0)
 
     values, unread = github.read_issue_values(C(), ["A"])
-    assert values == {"A": {"Start date": ["2026-02-01", None]}} and unread == 0
+    assert values == {"A": {"Start date": ["2026-02-01", "t1"]}} and unread == 0
     assert slept == [github.READ_WAIT]
+
+
+def test_synced_value_without_an_event_is_unread():
+    effort = {"name": "High", "field": {"name": "Effort"}}
+    long_timeline = {"totalCount": 150, "nodes": [SET_START | {"issueField": {"name": "Notes"}}] * 100}
+    nodes = [
+        issue_node("A", values=[START]),  # the timeline came back empty
+        issue_node("B", values=[effort]),  # Effort is not a synced source
+        issue_node("C", values=[START]) | {"timelineItems": long_timeline},  # the event is older than the read
+        issue_node("D", values=[START], events=[SET_START]),
+        issue_node("E", values=[START]) | {"timelineItems": long_timeline | {"totalCount": 100}},  # full, no event
+    ]
+    values, unread = github.read_issue_values(Fake(values=nodes), ["A", "B", "C", "D", "E"])
+    assert unread == 2 and sorted(values) == ["B", "C", "D"]
+    assert values["B"] == {"Effort": ["High", None]} and values["C"] == {"Start date": ["2026-02-01", None]}
+    assert github.TIMELINE_LAST == 100 and "timelineItems(last: 100," in github.ISSUE_VALUES_QUERY
+    assert "ISSUE_FIELD_REMOVED_EVENT]) { totalCount nodes {" in github.ISSUE_VALUES_QUERY
 
 
 def test_short_issue_read_stops_after_the_attempts(slept):

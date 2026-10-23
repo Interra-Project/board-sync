@@ -87,7 +87,7 @@ class ShortBoardRead(ShortRead):
 
 
 class ShortIssueRead(ShortRead):
-    """A read of issue field values gave fewer values or issues than asked for."""
+    """A read of issue field values gave fewer values, events or issues than asked for."""
 
 
 # Attempts of one read, and seconds between them, when a read comes back short.
@@ -399,8 +399,9 @@ def _read_issue_batch(client, ids):
         timeline = node.get("timelineItems")
         if timeline is None or timeline.get("nodes") is None:
             raise ShortIssueRead("an issue has no timeline list")
-        if _count(timeline["nodes"]) != min(timeline["totalCount"], TIMELINE_LAST):
-            raise ShortIssueRead(f"an issue has {_count(timeline['nodes'])} events, total {timeline['totalCount']}")
+        total = timeline.get("totalCount")
+        if not isinstance(total, int) or _count(timeline["nodes"]) != min(total, TIMELINE_LAST):
+            raise ShortIssueRead(f"an issue has {_count(timeline['nodes'])} events, total {total}")
         times, removed = {}, set()
         for ev in timeline["nodes"]:
             name = ((ev or {}).get("issueField") or {}).get("name")
@@ -418,8 +419,8 @@ def _read_issue_batch(client, ids):
         if any(name not in values for name in (ISSUE_NAMES & times.keys()) - removed):
             unread += 1  # a value that its latest event set is absent from the read
             continue
-        if timeline["totalCount"] <= TIMELINE_LAST and any(values[n][1] is None for n in ISSUE_NAMES & values.keys()):
-            unread += 1  # a synced value with no event in a complete timeline: the read lost events
+        if total <= TIMELINE_LAST and any(values[n][1] is None for n in ISSUE_NAMES & values.keys()):
+            unread += 1  # a synced value with no event although the timeline was read in full
             continue
         out[node["id"]] = values
     return out, unread

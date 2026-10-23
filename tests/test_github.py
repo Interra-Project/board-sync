@@ -359,6 +359,7 @@ def test_short_board_read_stops_after_the_attempts(slept):
 
 
 START = {"value": "2026-02-01", "field": {"name": "Start date"}}
+PRIORITY = {"name": "High", "field": {"name": "Priority"}}
 SET_START = {"__typename": "IssueFieldAddedEvent", "createdAt": "t1", "issueField": {"name": "Start date"}}
 
 
@@ -376,6 +377,9 @@ SET_START = {"__typename": "IssueFieldAddedEvent", "createdAt": "t1", "issueFiel
         {"nodes": [issue_node("A", values=[START]) | {"timelineItems": {"totalCount": 1, "nodes": [None]}}]},
         {"nodes": [issue_node("A", values=[START]) | {"timelineItems": {"totalCount": 1, "nodes": None}}]},
         {"nodes": [issue_node("A", values=[START]) | {"timelineItems": None}]},
+        {"nodes": [issue_node("A", values=[START]) | {"timelineItems": {"totalCount": None, "nodes": []}}]},
+        {"nodes": [issue_node("A", values=[START]) | {"timelineItems": {"nodes": []}}]},
+        {"nodes": [issue_node("A", values=[START]) | {"timelineItems": {"totalCount": 1, "nodes": [SET_START] * 2}}]},
         {"nodes": [issue_node("A", values=[START]) | {"timelineItems": {"totalCount": 0, "nodes": None}}]},
         {
             "nodes": [
@@ -405,11 +409,14 @@ def test_synced_value_without_an_event_is_unread():
         issue_node("C", values=[START]) | {"timelineItems": long_timeline},  # the event is older than the read
         issue_node("D", values=[START], events=[SET_START]),
         issue_node("E", values=[START]) | {"timelineItems": long_timeline | {"totalCount": 100}},  # full, no event
+        issue_node("F", values=[START]) | {"timelineItems": long_timeline | {"totalCount": 101}},  # one event not read
+        issue_node("G", values=[START, PRIORITY], events=[SET_START]),  # one of two values has no event
     ]
-    values, unread = github.read_issue_values(Fake(values=nodes), ["A", "B", "C", "D", "E"])
-    assert unread == 2 and sorted(values) == ["B", "C", "D"]
+    values, unread = github.read_issue_values(Fake(values=nodes), ["A", "B", "C", "D", "E", "F", "G"])
+    assert unread == 3 and sorted(values) == ["B", "C", "D", "F"]
     assert values["B"] == {"Effort": ["High", None]} and values["C"] == {"Start date": ["2026-02-01", None]}
     assert github.TIMELINE_LAST == 100 and "timelineItems(last: 100," in github.ISSUE_VALUES_QUERY
+    assert "__LAST__" not in github.ISSUE_VALUES_QUERY and "__FIELD_NAME__" not in github.ISSUE_VALUES_QUERY
     assert "ISSUE_FIELD_REMOVED_EVENT]) { totalCount nodes {" in github.ISSUE_VALUES_QUERY
 
 

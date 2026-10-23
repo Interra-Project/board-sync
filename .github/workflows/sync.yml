@@ -3,6 +3,7 @@ name: Board sync
 on:
   schedule:
     - cron: "11 * * * *"
+
   workflow_dispatch:
     inputs:
       apply:
